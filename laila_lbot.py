@@ -27,7 +27,7 @@ INITIAL_DEFAULT_CHANNELS = [-1002738530870]
 # مفتاح Groq (مجاني تمامًا، بلا فيزا) - من https://console.groq.com/keys
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
 GROQ_CHAT_MODEL  = "groq/compound"           # فيه بحث ويب تلقائي وقت اللزوم
-GROQ_INTENT_MODEL = "llama-3.3-70b-versatile"  # موديل أقوى لفهم العامية صح في الأوامر الإدارية
+GROQ_INTENT_MODEL = "openai/gpt-oss-120b"    # موديل قوي ومتاح حاليًا لفهم العامية في الأوامر الإدارية
 
 CHANNEL_WAIT_TIMEOUT_MS = 5 * 60 * 1000
 PROMPT_AUTO_DELETE_MS   = 60 * 1000
@@ -256,7 +256,8 @@ async def classify_admin_intent(text):
         "model": GROQ_INTENT_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
-        "max_tokens": 60,
+        "max_tokens": 300,
+        "reasoning_effort": "low",
         "response_format": {"type": "json_object"},
     }
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
