@@ -29,10 +29,6 @@ INITIAL_DEFAULT_CHANNELS = [-1002738530870]
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
 GROQ_CHAT_MODEL  = "groq/compound"           # فيه بحث ويب تلقائي وقت اللزوم
 
-# مفتاح Gemini (مجاني) - من https://aistudio.google.com/apikey — لتعديل الصور بس
-GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"  # لتعديل/توليد الصور (Nano Banana)
-
 CHANNEL_WAIT_TIMEOUT_MS = 5 * 60 * 1000
 PROMPT_AUTO_DELETE_MS   = 60 * 1000
 REMINDER_COOLDOWN_MS    = 5 * 60 * 1000
@@ -102,17 +98,6 @@ def invalidate_admin(cid, uid): _cache.pop(f"adm:{cid}:{uid}", None)
 def invalidate_bot_rights(cid):
     for k in list(_cache.keys()):
         if k.startswith(f"rights:{cid}"): _cache.pop(k, None)
-
-# ==================== حصر/تحديد استخدام تعديل الصور ====================
-IMAGE_EDIT_COOLDOWN_SEC = 30  # مدة الانتظار بين كل طلب تعديل صورة والتاني لنفس الشخص
-
-def check_image_cooldown(uid):
-    """بترجع True لو لسه في فترة الانتظار (يعني نرفض الطلب)، وبتسجل وقت الطلب الحالي لو مسموح."""
-    key = f"imgrl:{uid}"
-    if cache_get(key, IMAGE_EDIT_COOLDOWN_SEC) is not None:
-        return True
-    cache_set(key, True)
-    return False
 
 # ==================== تطبيع النص ====================
 def normalize_text(text):
@@ -304,93 +289,6 @@ async def maybe_ai_reply(bot, msg, cid, uid, text, first_name):
     answer = await ask_laila(cid, uid, query, first_name)
     try:
         await msg.reply_text(answer)
-    except TelegramError:
-        pass
-    return True
-
-async def ask_laila_image_edit(image_bytes, mime_type, instruction):
-    """بترجع (نص، صورة_bytes). أي منهم ممكن يكون None."""
-    if not GEMINI_API_KEY:
-        return ("⚠️ ميزة تعديل الصور مش متفعّلة دلوقتي (محتاجين مفتاح Gemini).", None)
-
-    b64 = base64.b64encode(image_bytes).decode()
-    payload = {
-        "contents": [{
-            "role": "user",
-            "parts": [
-                {"inline_data": {"mime_type": mime_type, "data": b64}},
-                {"text": instruction or "عدّل الصورة دي وخليها شكلها أحسن"},
-            ],
-        }],
-        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-    }
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    )
-    try:
-        data = await _post_with_retry(url, payload, timeout=60)
-        parts = data["candidates"][0]["content"]["parts"]
-        out_text, out_image = None, None
-        for p in parts:
-            if p.get("text"):
-                out_text = p["text"].strip()
-            inline = p.get("inlineData") or p.get("inline_data")
-            if inline and inline.get("data"):
-                out_image = base64.b64decode(inline["data"])
-        if not out_image and not out_text:
-            out_text = "🤔 مقدرتش أعدل الصورة دي، جرب توصيف تاني."
-        return (out_text, out_image)
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 429:
-            return ("⏳ في ضغط زيادة عليّا دلوقتي، استنى ثواني وجرب تاني.", None)
-        log.warning(f"⚠️ فشل تعديل الصورة: {e}")
-        return ("😔 معلش، حصل خطأ وأنا بحاول أعدل الصورة. جرب تاني كمان شوية.", None)
-    except Exception as e:
-        log.warning(f"⚠️ فشل تعديل الصورة: {e}")
-        return ("😔 معلش، حصل خطأ وأنا بحاول أعدل الصورة. جرب تاني كمان شوية.", None)
-
-async def maybe_ai_image_reply(bot, msg, cid, uid):
-    """بتتعامل مع رسائل الصور في الجروب (نداء بالاسم أو رد على رسالة البوت)."""
-    if not msg.photo:
-        return False
-    caption = msg.caption or ""
-    query = extract_ai_query(caption)
-    replying_to_bot = bool(
-        msg.reply_to_message
-        and msg.reply_to_message.from_user
-        and msg.reply_to_message.from_user.id == bot.id
-    )
-    if query is None and not replying_to_bot:
-        return False
-    instruction = query if query else (caption.strip() or "عدّل الصورة وخليها شكلها أحسن")
-
-    if check_image_cooldown(uid):
-        try:
-            await msg.reply_text(f"⏳ استنى شوية قبل ما تطلب تعديل صورة تاني (طلب كل {IMAGE_EDIT_COOLDOWN_SEC} ثانية).")
-        except TelegramError:
-            pass
-        return True
-
-    try:
-        await bot.send_chat_action(cid, "upload_photo")
-    except TelegramError:
-        pass
-
-    try:
-        tg_file = await bot.get_file(msg.photo[-1].file_id)
-        img_bytes = bytes(await tg_file.download_as_bytearray())
-    except TelegramError:
-        try: await msg.reply_text("😔 مقدرتش أنزل الصورة، جرب تبعتها تاني.")
-        except TelegramError: pass
-        return True
-
-    out_text, out_image = await ask_laila_image_edit(img_bytes, "image/jpeg", instruction)
-    try:
-        if out_image:
-            await msg.reply_photo(photo=out_image, caption=out_text or "✅ اتعملت")
-        else:
-            await msg.reply_text(out_text or "🤔 معرفتش أعدل الصورة.")
     except TelegramError:
         pass
     return True
@@ -1040,8 +938,9 @@ def commands_text():
             "🛑 *تعطيل الالعاب* → إيقاف الألعاب\n\n"
             "🎯 *في الجروب:*\n"
             "اكتب *الألعاب* عشان تشوف كل الألعاب\n\n"
-            "💡 كمان تقدر تنادي *ليلى* وهي رادّة على حد وتقولها بالعامية "
-            "\"احظريه\" أو \"طرده\" أو \"رقّيه أدمن\" وهي هتفهم وتنفذ.")
+            "💡 كمان تقدر ترد على حد وتقوله بأي صيغة عامية "
+            "\"احظريه\" أو \"طرده\" أو \"رقّيه أدمن\" وهو هيفهم وينفذ، "
+            "أو تنادي *ليلى* وتقولها نفس الكلام.")
 
 def protect_text(antilink, banned_count):
     al = "✅ مفعّل" if antilink else "❌ معطّل"
@@ -1601,34 +1500,6 @@ async def on_private_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not pending:
         cid = update.effective_chat.id
         uid = update.effective_user.id
-        if update.message.photo:
-            instruction = (update.message.caption or "").strip() or "عدّل الصورة وخليها شكلها أحسن"
-            if check_image_cooldown(uid):
-                try:
-                    await update.message.reply_text(f"⏳ استنى شوية قبل ما تطلب تعديل صورة تاني (طلب كل {IMAGE_EDIT_COOLDOWN_SEC} ثانية).")
-                except TelegramError:
-                    pass
-                return
-            try:
-                await ctx.bot.send_chat_action(cid, "upload_photo")
-            except TelegramError:
-                pass
-            try:
-                tg_file = await ctx.bot.get_file(update.message.photo[-1].file_id)
-                img_bytes = bytes(await tg_file.download_as_bytearray())
-            except TelegramError:
-                try: await update.message.reply_text("😔 مقدرتش أنزل الصورة، جرب تبعتها تاني.")
-                except TelegramError: pass
-                return
-            out_text, out_image = await ask_laila_image_edit(img_bytes, "image/jpeg", instruction)
-            try:
-                if out_image:
-                    await update.message.reply_photo(photo=out_image, caption=out_text or "✅ اتعملت")
-                else:
-                    await update.message.reply_text(out_text or "🤔 معرفتش أعدل الصورة.")
-            except TelegramError:
-                pass
-            return
         text = (update.message.text or "").strip()
         if text:
             try:
@@ -2006,6 +1877,27 @@ async def handle_admin_command(bot, msg, cid, uid, norm, reply_to):
     await perform_mod_action(bot, msg, cid, reply_to, action)
     return True
 
+async def handle_free_form_admin_command(bot, msg, cid, uid, text, reply_to):
+    """فallback: لو الأدمن رد على حد وكتب أمر بصياغة حرة (مش من الكلمات الثابتة)،
+    بنستخدم الذكاء الاصطناعي يفهم قصده وينفذ الأمر المناسب."""
+    if not reply_to or not reply_to.from_user:
+        return False
+    if reply_to.from_user.id == bot.id or reply_to.from_user.is_bot:
+        return False
+    if not GROQ_API_KEY or not text:
+        return False
+    sender_admin = await is_user_admin(bot, cid, uid)
+    if not sender_admin and not is_owner(uid):
+        return False
+    # تجنّب استدعاء الذكاء الاصطناعي على رسائل طويلة (مش أوامر إدارية غالباً)
+    if len(text) > 80:
+        return False
+    action = await classify_moderation_intent(text)
+    if action == "none":
+        return False
+    await perform_mod_action(bot, msg, cid, reply_to, action)
+    return True
+
 async def on_group_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg: return
@@ -2018,9 +1910,12 @@ async def on_group_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = msg.text or ""
     norm = normalize_text(text)
 
-    # ===== أوامر إدارية =====
+    # ===== أوامر إدارية (كلمات ثابتة) =====
     if msg.reply_to_message and text:
         handled = await handle_admin_command(ctx.bot, msg, cid, uid, norm, msg.reply_to_message)
+        if handled: return
+        # ===== أوامر إدارية بصياغة حرة (الذكاء الاصطناعي يفهمها من غير الحاجة لنداء "ليلى") =====
+        handled = await handle_free_form_admin_command(ctx.bot, msg, cid, uid, text, msg.reply_to_message)
         if handled: return
 
     # ===== أوامر الألعاب =====
@@ -2049,12 +1944,6 @@ async def on_group_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if bw and not await is_user_admin(ctx.bot, cid, uid):
             try: await msg.delete()
             except: pass
-            return
-
-    # ===== ليلى - تعديل الصور بالذكاء الاصطناعي =====
-    if msg.photo:
-        handled = await maybe_ai_image_reply(ctx.bot, msg, cid, uid)
-        if handled:
             return
 
     # ===== ليلى - الذكاء الاصطناعي =====
