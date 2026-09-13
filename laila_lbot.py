@@ -27,7 +27,7 @@ INITIAL_DEFAULT_CHANNELS = [-1002738530870]
 # مفتاح Gemini (مجاني) - من https://aistudio.google.com/apikey
 # مفتاح Gemini (مجاني) - من https://aistudio.google.com/apikey
 GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL     = "gemini-3.8-flash"        # للكلام والرد النصي (أحدث نسخة)
+GEMINI_MODEL     = "gemini-3.1-flash-lite"   # للكلام والرد النصي (حصة مجانية أكبر)
 GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"  # لتعديل/توليد الصور (Nano Banana)
 
 CHANNEL_WAIT_TIMEOUT_MS = 5 * 60 * 1000
@@ -118,6 +118,32 @@ def find_reply_for(text):
     return random.choice(matches)
 
 # ==================== ليلى - الذكاء الاصطناعي ====================
+async def _call_gemini(url, payload, timeout=30, retries=2):
+    """بتنادي Gemini، ولو رجعلها 429 (ضغط مؤقت) بتستنى شوية وتجرب تاني."""
+    delay = 2
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(url, json=payload)
+                if r.status_code == 429 and attempt < retries:
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                r.raise_for_status()
+                return r.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429 and attempt < retries:
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            last_exc = e
+            break
+        except Exception as e:
+            last_exc = e
+            break
+    raise last_exc
+
 # ينادي عليها بأي صيغة من: "يا ليلى"، "يا ليلي"، "ليلى"، "ليلي" في أول الرسالة
 AI_NAME_PATTERN = re.compile(
     r'^\s*(?:يا\s+)?(?:ليلى|ليلي)\b[\s,.:!؟\-–_]*',
@@ -163,13 +189,16 @@ async def ask_laila(chat_id, user_id, query, first_name=""):
         f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     )
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(url, json=payload)
-            r.raise_for_status()
-            data = r.json()
+        data = await _call_gemini(url, payload, timeout=30)
         answer = data["candidates"][0]["content"]["parts"][0]["text"].strip()
         if not answer:
             answer = "🤔 معرفتش أرد، جرب تسأل بطريقة تانية."
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            log.warning(f"⚠️ ضغط زيادة على Gemini: {e}")
+            return "⏳ في ضغط زيادة عليّا دلوقتي، استنى ثواني وجرب تاني."
+        log.warning(f"⚠️ فشل استدعاء الذكاء الاصطناعي: {e}")
+        return "😔 معلش، حصل خطأ وأنا بحاول أفكر. جرب تاني كمان شوية."
     except Exception as e:
         log.warning(f"⚠️ فشل استدعاء الذكاء الاصطناعي: {e}")
         return "😔 معلش، حصل خطأ وأنا بحاول أفكر. جرب تاني كمان شوية."
@@ -211,10 +240,7 @@ async def classify_moderation_intent(text):
         f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     )
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(url, json=payload)
-            r.raise_for_status()
-            data = r.json()
+        data = await _call_gemini(url, payload, timeout=15)
         action = data["candidates"][0]["content"]["parts"][0]["text"].strip().lower()
         return action if action in MOD_ACTIONS else "none"
     except Exception as e:
@@ -281,10 +307,7 @@ async def ask_laila_image_edit(image_bytes, mime_type, instruction):
         f"{GEMINI_IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}"
     )
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(url, json=payload)
-            r.raise_for_status()
-            data = r.json()
+        data = await _call_gemini(url, payload, timeout=60)
         parts = data["candidates"][0]["content"]["parts"]
         out_text, out_image = None, None
         for p in parts:
@@ -296,6 +319,11 @@ async def ask_laila_image_edit(image_bytes, mime_type, instruction):
         if not out_image and not out_text:
             out_text = "🤔 مقدرتش أعدل الصورة دي، جرب توصيف تاني."
         return (out_text, out_image)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            return ("⏳ في ضغط زيادة عليّا دلوقتي، استنى ثواني وجرب تاني.", None)
+        log.warning(f"⚠️ فشل تعديل الصورة: {e}")
+        return ("😔 معلش، حصل خطأ وأنا بحاول أعدل الصورة. جرب تاني كمان شوية.", None)
     except Exception as e:
         log.warning(f"⚠️ فشل تعديل الصورة: {e}")
         return ("😔 معلش، حصل خطأ وأنا بحاول أعدل الصورة. جرب تاني كمان شوية.", None)
