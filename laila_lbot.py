@@ -20,14 +20,22 @@ from telegram.ext import (
 import db
 
 # ==================== الإعدادات ====================
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+if not BOT_TOKEN:
+    raise SystemExit(
+        "❌ متغير البيئة BOT_TOKEN مش موجود.\n"
+        "روح لإعدادات المشروع (Railway/Render/إلخ) وضيف Variable اسمه BOT_TOKEN "
+        "وقيمته التوكن اللي جبته من @BotFather."
+    )
 OWNER_ID = 8666320077
 INITIAL_DEFAULT_CHANNELS = [-1002738530870]
 
 # مفتاح Gemini (مجاني) - من https://aistudio.google.com/apikey
-# مفتاح Groq (مجاني تمامًا، بلا فيزا) - من https://console.groq.com/keys
-GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
-GROQ_CHAT_MODEL  = "groq/compound"           # فيه بحث ويب تلقائي وقت اللزوم
+GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
+# "gemini-flash-latest" هو alias دايمًا بيشاور على أحدث نسخة فلاش مجانية ومستقرة من جوجل،
+# فمش هيتعطل لما جوجل توقف نسخة معينة (زي ما بيحصل مع أسماء مثبتة زي gemini-2.5-flash).
+GEMINI_MODEL     = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")        # للكلام والرد النصي
+GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")  # لتعديل/توليد الصور (Nano Banana)
 
 CHANNEL_WAIT_TIMEOUT_MS = 5 * 60 * 1000
 PROMPT_AUTO_DELETE_MS   = 60 * 1000
@@ -59,10 +67,6 @@ TRIGGER_MUTE = ("كتم",)
 TRIGGER_UNMUTE = ("الغاء الكتم", "إلغاء الكتم", "الغاء كتم", "إلغاء كتم")
 TRIGGER_DELETE = ("مسح",)
 TRIGGER_KICK = ("طرد", "اطرد", "اطرده", "طرده")
-TRIGGER_PROMOTE = ("رفع ادمن", "رفع الادمن", "رفع أدمن", "رفع الأدمن", "ترقية", "ترقيه", "رقيه ادمن", "رقّيه ادمن")
-TRIGGER_DEMOTE = ("تنزيل ادمن", "تنزيل الادمن", "تنزيل أدمن", "تنزيل الأدمن",
-                   "الغاء الادمنيه", "إلغاء الأدمنية", "الغاء ادمنيته", "إلغاء أدمنيته",
-                   "سحب الادمنيه", "سحب الأدمنية", "سحب الادمنيه منه")
 TRIGGER_GAMES_ON = ("تفعيل الالعاب", "تفعيل الألعاب", "شغل الالعاب", "شغل الألعاب")
 TRIGGER_GAMES_OFF = ("تعطيل الالعاب", "تعطيل الألعاب", "وقف الالعاب", "وقف الألعاب")
 
@@ -122,32 +126,6 @@ def find_reply_for(text):
     return random.choice(matches)
 
 # ==================== ليلى - الذكاء الاصطناعي ====================
-async def _post_with_retry(url, payload, headers=None, timeout=30, retries=2):
-    """بتنادي أي API، ولو رجعله 429 (ضغط مؤقت) بتستنى شوية وتجرب تاني."""
-    delay = 2
-    last_exc = None
-    for attempt in range(retries + 1):
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.post(url, json=payload, headers=headers)
-                if r.status_code == 429 and attempt < retries:
-                    await asyncio.sleep(delay)
-                    delay *= 2
-                    continue
-                r.raise_for_status()
-                return r.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429 and attempt < retries:
-                await asyncio.sleep(delay)
-                delay *= 2
-                continue
-            last_exc = e
-            break
-        except Exception as e:
-            last_exc = e
-            break
-    raise last_exc
-
 # ينادي عليها بأي صيغة من: "يا ليلى"، "يا ليلي"، "ليلى"، "ليلي" في أول الرسالة
 AI_NAME_PATTERN = re.compile(
     r'^\s*(?:يا\s+)?(?:ليلى|ليلي)\b[\s,.:!؟\-–_]*',
@@ -174,81 +152,78 @@ def extract_ai_query(raw_text):
     return stripped[m.end():].strip()
 
 async def ask_laila(chat_id, user_id, query, first_name=""):
-    if not GROQ_API_KEY:
-        return "⚠️ ميزة الذكاء الاصطناعي مش متفعّلة دلوقتي (محتاجين مفتاح Groq)."
+    if not GEMINI_API_KEY:
+        return "⚠️ ميزة الذكاء الاصطناعي مش متفعّلة دلوقتي (محتاجين مفتاح Gemini)."
 
     hist = db.get_ai_history(chat_id, user_id, limit=200)
 
-    messages = [{"role": "system", "content": LAILA_SYSTEM_PROMPT}]
-    for h in hist:
-        role = "assistant" if h["role"] == "assistant" else "user"
-        messages.append({"role": role, "content": h["text"]})
-    messages.append({"role": "user", "content": query})
+    contents = [{"role": h["role"], "parts": [{"text": h["text"]}]} for h in hist]
+    contents.append({"role": "user", "parts": [{"text": query}]})
 
     payload = {
-        "model": GROQ_CHAT_MODEL,
-        "messages": messages,
-        "max_tokens": 600,
-        "temperature": 0.8,
+        "system_instruction": {"parts": [{"text": LAILA_SYSTEM_PROMPT}]},
+        "contents": contents,
+        "generationConfig": {"maxOutputTokens": 600, "temperature": 0.8},
     }
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    url = "https://api.groq.com/openai/v1/chat/completions"
-
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
     try:
-        data = await _post_with_retry(url, payload, headers=headers, timeout=30)
-        answer = data["choices"][0]["message"]["content"].strip()
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(url, json=payload)
+            r.raise_for_status()
+            data = r.json()
+        answer = data["candidates"][0]["content"]["parts"][0]["text"].strip()
         if not answer:
             answer = "🤔 معرفتش أرد، جرب تسأل بطريقة تانية."
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 429:
-            log.warning(f"⚠️ ضغط زيادة على Groq: {e}")
-            return "⏳ في ضغط زيادة عليّا دلوقتي، استنى ثواني وجرب تاني."
-        log.warning(f"⚠️ فشل استدعاء الذكاء الاصطناعي: {e}")
-        return "😔 معلش، حصل خطأ وأنا بحاول أفكر. جرب تاني كمان شوية."
     except Exception as e:
         log.warning(f"⚠️ فشل استدعاء الذكاء الاصطناعي: {e}")
         return "😔 معلش، حصل خطأ وأنا بحاول أفكر. جرب تاني كمان شوية."
 
     db.add_ai_message(chat_id, user_id, "user", query)
-    db.add_ai_message(chat_id, user_id, "assistant", answer)
+    db.add_ai_message(chat_id, user_id, "model", answer)
     return answer
 
-MOD_ACTIONS = ("ban", "unban", "mute", "unmute", "warn", "unwarn", "delete",
-               "kick", "promote", "demote", "none")
+MOD_ACTIONS = ("ban", "unban", "kick", "mute", "unmute", "warn", "unwarn", "delete", "none")
 
 async def classify_moderation_intent(text):
     """بتستخدم الذكاء الاصطناعي تفهم لو الجملة أمر إداري (كتم/حظر/تحذير..) وترجع نوعه."""
-    if not GROQ_API_KEY or not text:
+    if not GEMINI_API_KEY or not text:
         return "none"
     prompt = (
         "انت مصنّف نوايا لبوت إدارة جروبات تليجرام. هيوصلك جملة عربي عامية موجهة لشخص "
         "معين (البوت رادّ على رسالته). حدد هل الجملة أمر إداري، ولو أيوه نوعه من الفئات دي بالظبط:\n"
-        "ban = حظر أو طرد نهائي من الجروب بحيث ميرجعش تاني\n"
+        "ban = حظر نهائي من الجروب (مايقدرش يرجع تاني إلا بفك الحظر)\n"
         "unban = فك الحظر\n"
-        "kick = طرده برا الجروب دلوقتي بس من غير حظر دائم، يقدر يرجع تاني لو حب\n"
+        "kick = طرد بس مش حظر دائم (يقدر يرجع تاني بدعوة)\n"
         "mute = كتم أو منعه من الكتابة\n"
         "unmute = فك الكتم\n"
         "warn = تحذيره\n"
         "unwarn = إلغاء تحذيراته\n"
-        "promote = رفعه أدمن / ترقيته أدمن في الجروب\n"
-        "demote = سحب صلاحيات الأدمن منه / تنزيله من الأدمنية\n"
         "delete = امسحي رسالته بس من غير أي عقاب\n"
         "none = مش أمر إداري خالص، كلام عادي أو سؤال أو دردشة\n\n"
         f"الجملة: \"{text}\"\n"
-        "رد بكلمة واحدة بس من الفئات اللي فوق بالظبط، من غير أي كلام زيادة أو علامات ترقيم."
+        "رد بكلمة واحدة بس من الفئات اللي فوق بالظبط، من غير أي كلام زيادة."
     )
     payload = {
-        "model": "llama-3.1-8b-instant",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": 5,
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "text/x.enum",
+            "responseSchema": {"type": "STRING", "enum": list(MOD_ACTIONS)},
+        },
     }
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
     try:
-        data = await _post_with_retry(url, payload, headers=headers, timeout=15)
-        action = data["choices"][0]["message"]["content"].strip().lower()
-        action = re.sub(r"[^a-z]", "", action)
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(url, json=payload)
+            r.raise_for_status()
+            data = r.json()
+        action = data["candidates"][0]["content"]["parts"][0]["text"].strip().lower()
         return action if action in MOD_ACTIONS else "none"
     except Exception as e:
         log.warning(f"⚠️ فشل تصنيف نية الأمر الإداري: {e}")
@@ -271,7 +246,7 @@ async def maybe_ai_reply(bot, msg, cid, uid, text, first_name):
     if not query:
         query = "قولتلي اسمي بس من غير سؤال، رحبي بيا باختصار واسأليني احتاج مساعدة في ايه."
 
-    # لو نادتلي وهي رد على عضو تاني، ممكن يكون أمر إداري (كتم/حظر/تحذير/رفع أدمن/طرد...)
+    # لو نادتلي وهي رد على عضو تاني، ممكن يكون أمر إداري (كتم/حظر/تحذير...)
     reply_to = msg.reply_to_message
     if reply_to and reply_to.from_user and reply_to.from_user.id != bot.id:
         sender_admin = await is_user_admin(bot, cid, uid)
@@ -289,6 +264,84 @@ async def maybe_ai_reply(bot, msg, cid, uid, text, first_name):
     answer = await ask_laila(cid, uid, query, first_name)
     try:
         await msg.reply_text(answer)
+    except TelegramError:
+        pass
+    return True
+
+async def ask_laila_image_edit(image_bytes, mime_type, instruction):
+    """بترجع (نص، صورة_bytes). أي منهم ممكن يكون None."""
+    if not GEMINI_API_KEY:
+        return ("⚠️ ميزة تعديل الصور مش متفعّلة دلوقتي (محتاجين مفتاح Gemini).", None)
+
+    b64 = base64.b64encode(image_bytes).decode()
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"inline_data": {"mime_type": mime_type, "data": b64}},
+                {"text": instruction or "عدّل الصورة دي وخليها شكلها أحسن"},
+            ],
+        }],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(url, json=payload)
+            r.raise_for_status()
+            data = r.json()
+        parts = data["candidates"][0]["content"]["parts"]
+        out_text, out_image = None, None
+        for p in parts:
+            if p.get("text"):
+                out_text = p["text"].strip()
+            inline = p.get("inlineData") or p.get("inline_data")
+            if inline and inline.get("data"):
+                out_image = base64.b64decode(inline["data"])
+        if not out_image and not out_text:
+            out_text = "🤔 مقدرتش أعدل الصورة دي، جرب توصيف تاني."
+        return (out_text, out_image)
+    except Exception as e:
+        log.warning(f"⚠️ فشل تعديل الصورة: {e}")
+        return ("😔 معلش، حصل خطأ وأنا بحاول أعدل الصورة. جرب تاني كمان شوية.", None)
+
+async def maybe_ai_image_reply(bot, msg, cid, uid):
+    """بتتعامل مع رسائل الصور في الجروب (نداء بالاسم أو رد على رسالة البوت)."""
+    if not msg.photo:
+        return False
+    caption = msg.caption or ""
+    query = extract_ai_query(caption)
+    replying_to_bot = bool(
+        msg.reply_to_message
+        and msg.reply_to_message.from_user
+        and msg.reply_to_message.from_user.id == bot.id
+    )
+    if query is None and not replying_to_bot:
+        return False
+    instruction = query if query else (caption.strip() or "عدّل الصورة وخليها شكلها أحسن")
+
+    try:
+        await bot.send_chat_action(cid, "upload_photo")
+    except TelegramError:
+        pass
+
+    try:
+        tg_file = await bot.get_file(msg.photo[-1].file_id)
+        img_bytes = bytes(await tg_file.download_as_bytearray())
+    except TelegramError:
+        try: await msg.reply_text("😔 مقدرتش أنزل الصورة، جرب تبعتها تاني.")
+        except TelegramError: pass
+        return True
+
+    out_text, out_image = await ask_laila_image_edit(img_bytes, "image/jpeg", instruction)
+    try:
+        if out_image:
+            await msg.reply_photo(photo=out_image, caption=out_text or "✅ اتعملت")
+        else:
+            await msg.reply_text(out_text or "🤔 معرفتش أعدل الصورة.")
     except TelegramError:
         pass
     return True
@@ -330,10 +383,9 @@ async def get_bot_rights(bot, cid, fresh=False):
         is_admin = m.status in ("administrator","creator")
         can_del = bool(getattr(m, "can_delete_messages", False)) if is_admin else False
         can_restrict = bool(getattr(m, "can_restrict_members", False)) if is_admin else False
-        can_promote = bool(getattr(m, "can_promote_members", False)) if is_admin else False
-        res = {"is_admin": is_admin, "can_delete": can_del, "can_restrict": can_restrict, "can_promote": can_promote}
+        res = {"is_admin": is_admin, "can_delete": can_del, "can_restrict": can_restrict}
     except TelegramError:
-        res = {"is_admin": False, "can_delete": False, "can_restrict": False, "can_promote": False}
+        res = {"is_admin": False, "can_delete": False, "can_restrict": False}
     cache_set(key, res)
     return res
 
@@ -926,21 +978,19 @@ def commands_text():
             "الأوامر دي للمشرفين والمالك بس 👇\n\n"
             "🚫 *حظر* (بالرد)\n"
             "🔓 *الغاء الحظر* (بالرد)\n"
-            "👢 *طرد* (بالرد) — يطرده بس مش حظر دائم\n"
+            "👢 *طرد* (بالرد)\n"
             "🔇 *كتم* (بالرد)\n"
             "🔊 *الغاء الكتم* (بالرد)\n"
             "⚠️ *تحذير* (بالرد)\n"
             "✅ *الغاء التحذير* (بالرد)\n"
-            "👮 *رفع أدمن* (بالرد) — يرقّيه أدمن\n"
-            "⬇️ *تنزيل أدمن* (بالرد) — يسحب صلاحياته\n"
             "🗑 *مسح* (بالرد)\n\n"
+            "🤖 *أو من غير ما تحفظ كلمة معينة:*\n"
+            "رد على العضو وقولها \"يا ليلى اكتميه\" أو \"يا ليلى ابعده\" أو أي صياغة "
+            "طبيعية زي كلامك العادي، وهي هتفهم المطلوب وتنفذه (لازم تكون أدمن).\n\n"
             "🎮 *تفعيل الالعاب* → تشغيل الألعاب\n"
             "🛑 *تعطيل الالعاب* → إيقاف الألعاب\n\n"
             "🎯 *في الجروب:*\n"
-            "اكتب *الألعاب* عشان تشوف كل الألعاب\n\n"
-            "💡 كمان تقدر ترد على حد وتقوله بأي صيغة عامية "
-            "\"احظريه\" أو \"طرده\" أو \"رقّيه أدمن\" وهو هيفهم وينفذ، "
-            "أو تنادي *ليلى* وتقولها نفس الكلام.")
+            "اكتب *الألعاب* عشان تشوف كل الألعاب")
 
 def protect_text(antilink, banned_count):
     al = "✅ مفعّل" if antilink else "❌ معطّل"
@@ -1500,6 +1550,28 @@ async def on_private_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not pending:
         cid = update.effective_chat.id
         uid = update.effective_user.id
+        if update.message.photo:
+            instruction = (update.message.caption or "").strip() or "عدّل الصورة وخليها شكلها أحسن"
+            try:
+                await ctx.bot.send_chat_action(cid, "upload_photo")
+            except TelegramError:
+                pass
+            try:
+                tg_file = await ctx.bot.get_file(update.message.photo[-1].file_id)
+                img_bytes = bytes(await tg_file.download_as_bytearray())
+            except TelegramError:
+                try: await update.message.reply_text("😔 مقدرتش أنزل الصورة، جرب تبعتها تاني.")
+                except TelegramError: pass
+                return
+            out_text, out_image = await ask_laila_image_edit(img_bytes, "image/jpeg", instruction)
+            try:
+                if out_image:
+                    await update.message.reply_photo(photo=out_image, caption=out_text or "✅ اتعملت")
+                else:
+                    await update.message.reply_text(out_text or "🤔 معرفتش أعدل الصورة.")
+            except TelegramError:
+                pass
+            return
         text = (update.message.text or "").strip()
         if text:
             try:
@@ -1700,7 +1772,7 @@ def contains_link(text):
     return bool(re.search(r"(https?://|t\.me/|www\.|telegram\.me/)", text.lower()))
 
 async def perform_mod_action(bot, msg, cid, reply_to, action):
-    """بتنفّذ فعل إداري فعلي (حظر/كتم/تحذير/طرد/رفع أدمن/مسح...) على صاحب الرسالة reply_to."""
+    """بتنفّذ فعل إداري فعلي (حظر/كتم/تحذير/مسح...) على صاحب الرسالة reply_to."""
     target = reply_to.from_user
     target_id = target.id
 
@@ -1718,16 +1790,6 @@ async def perform_mod_action(bot, msg, cid, reply_to, action):
             try: await msg.reply_text(f"⚠️ فشل الحظر: {e.message}")
             except TelegramError: pass
 
-    elif action == "unban":
-        try:
-            await bot.unban_chat_member(cid, target_id, only_if_banned=True)
-            await msg.reply_text(
-                f"🔓 تم فك الحظر عن <a href=\"tg://user?id={target_id}\">{escape_html(target.first_name)}</a>",
-                parse_mode=ParseMode.HTML)
-        except TelegramError as e:
-            try: await msg.reply_text(f"⚠️ فشل: {e.message}")
-            except TelegramError: pass
-
     elif action == "kick":
         if target_id == OWNER_ID:
             try: await msg.reply_text("⚠️ لا يمكن طرد المالك.")
@@ -1737,11 +1799,20 @@ async def perform_mod_action(bot, msg, cid, reply_to, action):
             await bot.ban_chat_member(cid, target_id)
             await bot.unban_chat_member(cid, target_id, only_if_banned=True)
             await msg.reply_text(
-                f"👢 تم طرد <a href=\"tg://user?id={target_id}\">{escape_html(target.first_name)}</a> من الجروب "
-                "(يقدر يرجع تاني لو حب)",
+                f"👢 تم طرد <a href=\"tg://user?id={target_id}\">{escape_html(target.first_name)}</a>",
                 parse_mode=ParseMode.HTML)
         except TelegramError as e:
             try: await msg.reply_text(f"⚠️ فشل الطرد: {e.message}")
+            except TelegramError: pass
+
+    elif action == "unban":
+        try:
+            await bot.unban_chat_member(cid, target_id, only_if_banned=True)
+            await msg.reply_text(
+                f"🔓 تم فك الحظر عن <a href=\"tg://user?id={target_id}\">{escape_html(target.first_name)}</a>",
+                parse_mode=ParseMode.HTML)
+        except TelegramError as e:
+            try: await msg.reply_text(f"⚠️ فشل: {e.message}")
             except TelegramError: pass
 
     elif action == "mute":
@@ -1793,55 +1864,6 @@ async def perform_mod_action(bot, msg, cid, reply_to, action):
                 parse_mode=ParseMode.HTML)
         except TelegramError: pass
 
-    elif action == "promote":
-        if target.is_bot:
-            try: await msg.reply_text("⚠️ لا يمكن ترقية بوت.")
-            except TelegramError: pass
-            return
-        try:
-            await bot.promote_chat_member(
-                cid, target_id,
-                can_delete_messages=True,
-                can_restrict_members=True,
-                can_invite_users=True,
-                can_pin_messages=True,
-                can_manage_chat=True,
-                can_manage_video_chats=True,
-                can_change_info=False,
-                can_promote_members=False,
-            )
-            await msg.reply_text(
-                f"👮 تم ترقية <a href=\"tg://user?id={target_id}\">{escape_html(target.first_name)}</a> لأدمن",
-                parse_mode=ParseMode.HTML)
-        except TelegramError as e:
-            try: await msg.reply_text(f"⚠️ فشلت الترقية: {e.message}")
-            except TelegramError: pass
-
-    elif action == "demote":
-        if target_id == OWNER_ID:
-            try: await msg.reply_text("⚠️ لا يمكن سحب صلاحيات المالك.")
-            except TelegramError: pass
-            return
-        try:
-            await bot.promote_chat_member(
-                cid, target_id,
-                can_delete_messages=False,
-                can_restrict_members=False,
-                can_invite_users=False,
-                can_pin_messages=False,
-                can_manage_chat=False,
-                can_manage_video_chats=False,
-                can_change_info=False,
-                can_promote_members=False,
-            )
-            invalidate_admin(cid, target_id)
-            await msg.reply_text(
-                f"⬇️ تم سحب صلاحيات الأدمن من <a href=\"tg://user?id={target_id}\">{escape_html(target.first_name)}</a>",
-                parse_mode=ParseMode.HTML)
-        except TelegramError as e:
-            try: await msg.reply_text(f"⚠️ فشل: {e.message}")
-            except TelegramError: pass
-
     elif action == "delete":
         try: await bot.delete_message(cid, reply_to.message_id)
         except TelegramError: pass
@@ -1867,34 +1889,11 @@ async def handle_admin_command(bot, msg, cid, uid, norm, reply_to):
     elif norm in [normalize_text(t) for t in TRIGGER_UNMUTE]: action = "unmute"
     elif norm in [normalize_text(t) for t in TRIGGER_WARN]: action = "warn"
     elif norm in [normalize_text(t) for t in TRIGGER_UNWARN]: action = "unwarn"
-    elif norm in [normalize_text(t) for t in TRIGGER_PROMOTE]: action = "promote"
-    elif norm in [normalize_text(t) for t in TRIGGER_DEMOTE]: action = "demote"
     elif norm in [normalize_text(t) for t in TRIGGER_DELETE]: action = "delete"
 
     if not action:
         return False
 
-    await perform_mod_action(bot, msg, cid, reply_to, action)
-    return True
-
-async def handle_free_form_admin_command(bot, msg, cid, uid, text, reply_to):
-    """فallback: لو الأدمن رد على حد وكتب أمر بصياغة حرة (مش من الكلمات الثابتة)،
-    بنستخدم الذكاء الاصطناعي يفهم قصده وينفذ الأمر المناسب."""
-    if not reply_to or not reply_to.from_user:
-        return False
-    if reply_to.from_user.id == bot.id or reply_to.from_user.is_bot:
-        return False
-    if not GROQ_API_KEY or not text:
-        return False
-    sender_admin = await is_user_admin(bot, cid, uid)
-    if not sender_admin and not is_owner(uid):
-        return False
-    # تجنّب استدعاء الذكاء الاصطناعي على رسائل طويلة (مش أوامر إدارية غالباً)
-    if len(text) > 80:
-        return False
-    action = await classify_moderation_intent(text)
-    if action == "none":
-        return False
     await perform_mod_action(bot, msg, cid, reply_to, action)
     return True
 
@@ -1910,12 +1909,9 @@ async def on_group_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = msg.text or ""
     norm = normalize_text(text)
 
-    # ===== أوامر إدارية (كلمات ثابتة) =====
+    # ===== أوامر إدارية =====
     if msg.reply_to_message and text:
         handled = await handle_admin_command(ctx.bot, msg, cid, uid, norm, msg.reply_to_message)
-        if handled: return
-        # ===== أوامر إدارية بصياغة حرة (الذكاء الاصطناعي يفهمها من غير الحاجة لنداء "ليلى") =====
-        handled = await handle_free_form_admin_command(ctx.bot, msg, cid, uid, text, msg.reply_to_message)
         if handled: return
 
     # ===== أوامر الألعاب =====
@@ -1944,6 +1940,12 @@ async def on_group_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if bw and not await is_user_admin(ctx.bot, cid, uid):
             try: await msg.delete()
             except: pass
+            return
+
+    # ===== ليلى - تعديل الصور بالذكاء الاصطناعي =====
+    if msg.photo:
+        handled = await maybe_ai_image_reply(ctx.bot, msg, cid, uid)
+        if handled:
             return
 
     # ===== ليلى - الذكاء الاصطناعي =====
