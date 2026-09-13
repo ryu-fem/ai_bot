@@ -27,7 +27,7 @@ INITIAL_DEFAULT_CHANNELS = [-1002738530870]
 # مفتاح Gemini (مجاني) - من https://aistudio.google.com/apikey
 # مفتاح Gemini (مجاني) - من https://aistudio.google.com/apikey
 GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL     = "gemini-3.5-flash"        # للكلام والرد النصي
+GEMINI_MODEL     = "gemini-3.8-flash"        # للكلام والرد النصي (أحدث نسخة)
 GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"  # لتعديل/توليد الصور (Nano Banana)
 
 CHANNEL_WAIT_TIMEOUT_MS = 5 * 60 * 1000
@@ -155,6 +155,7 @@ async def ask_laila(chat_id, user_id, query, first_name=""):
     payload = {
         "system_instruction": {"parts": [{"text": LAILA_SYSTEM_PROMPT}]},
         "contents": contents,
+        "tools": [{"google_search": {}}],
         "generationConfig": {"maxOutputTokens": 600, "temperature": 0.8},
     }
     url = (
