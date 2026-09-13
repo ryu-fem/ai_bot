@@ -27,7 +27,7 @@ INITIAL_DEFAULT_CHANNELS = [-1002738530870]
 # مفتاح Groq (مجاني تمامًا، بلا فيزا) - من https://console.groq.com/keys
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
 GROQ_CHAT_MODEL  = "groq/compound"           # فيه بحث ويب تلقائي وقت اللزوم
-GROQ_INTENT_MODEL = "llama-3.1-8b-instant"   # للتصنيف السريع بس
+GROQ_INTENT_MODEL = "llama-3.3-70b-versatile"  # موديل أقوى لفهم العامية صح في الأوامر الإدارية
 
 CHANNEL_WAIT_TIMEOUT_MS = 5 * 60 * 1000
 PROMPT_AUTO_DELETE_MS   = 60 * 1000
@@ -264,12 +264,14 @@ async def classify_admin_intent(text):
     try:
         data = await _post_with_retry(url, payload, headers=headers, timeout=15)
         raw = data["choices"][0]["message"]["content"].strip()
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
         parsed = json.loads(raw)
         action = str(parsed.get("action", "none")).strip().lower()
         word = parsed.get("word")
         word = word.strip() if isinstance(word, str) and word.strip() else None
         if action not in ADMIN_ACTIONS:
             action = "none"
+        log.info(f"🧭 تصنيف إداري: \"{text}\" -> {action} (كلمة: {word})")
         return {"action": action, "word": word}
     except Exception as e:
         log.warning(f"⚠️ فشل تصنيف المهمة الإدارية: {e}")
