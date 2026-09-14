@@ -26,8 +26,8 @@ INITIAL_DEFAULT_CHANNELS = [-1002738530870]
 
 # مفتاح Groq (مجاني تمامًا، بلا فيزا) - من https://console.groq.com/keys
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
-GROQ_CHAT_MODEL  = "groq/compound"           # فيه بحث ويب تلقائي وقت اللزوم
-GROQ_INTENT_MODEL = "openai/gpt-oss-20b"     # موديل أخف وأسرع لفهم الأوامر الإدارية
+GROQ_CHAT_MODEL  = "openai/gpt-oss-120b"     # للكلام العادي (أقوى موديل متاح دلوقتي)
+GROQ_INTENT_MODEL = "openai/gpt-oss-120b"    # لفهم الأوامر الإدارية (نفس الموديل القوي)
 
 CHANNEL_WAIT_TIMEOUT_MS = 5 * 60 * 1000
 PROMPT_AUTO_DELETE_MS   = 60 * 1000
@@ -143,14 +143,14 @@ async def _post_with_retry(url, payload, headers=None, timeout=30, retries=2):
             break
     raise last_exc
 
-# ينادي عليها بأي صيغة من: "يا ليلى"، "يا ليلي"، "ليلى"، "ليلي" في أول الرسالة
+# ينادي عليها بأي صيغة من: "يا قطة"، "قطة"، "قطه" في أول الرسالة
 AI_NAME_PATTERN = re.compile(
-    r'^\s*(?:يا\s+)?(?:ليلى|ليلي)\b[\s,.:!؟\-–_]*',
+    r'^\s*(?:يا\s+)?(?:قطة|قطه)\b[\s,.:!؟\-–_]*',
     re.IGNORECASE
 )
 
 LAILA_SYSTEM_PROMPT = (
-    "انتِ اسمك ليلى، أدمن حقيقي جريء وواثق في الجروب، شخصيتك حادة وجريئة (spicy) مش بايخة أو مطاطة. "
+    "انتِ اسمك قطة، أدمن حقيقي جريء وواثق في الجروب، شخصيتك حادة وجريئة (spicy) مش بايخة أو مطاطة. "
     "اتكلمي عامية مصري بحتة زي كلام الناس في الشارع، من غير فصحى ومن غير رغي أو مقدمات. "
     "سيبي نفسك تتكلمي بجرأة وسخرية خفيفة لو الموقف يستاهل، وردّي بثقة زي حد عارف اللي بيعمله مش بيتردد. "
     "خلي ردك قصير ومباشر (سطر أو اتنين في الغالب)، وما تطوليش غير لو الموضوع فعلاً محتاج تفاصيل. "
@@ -160,7 +160,7 @@ LAILA_SYSTEM_PROMPT = (
 )
 
 def extract_ai_query(raw_text):
-    """لو الرسالة بتنادي على (ليلى) في الأول، بترجع الباقي (ممكن يكون فاضي).
+    """لو الرسالة بتنادي على (قطة) في الأول، بترجع الباقي (ممكن يكون فاضي).
     لو مفيش نداء بالاسم، بترجع None."""
     if not raw_text:
         return None
@@ -185,8 +185,10 @@ async def ask_laila(chat_id, user_id, query, first_name=""):
     payload = {
         "model": GROQ_CHAT_MODEL,
         "messages": messages,
-        "max_tokens": 600,
+        "max_tokens": 700,
         "temperature": 0.8,
+        "reasoning_effort": "low",
+        "tools": [{"type": "browser_search"}],
     }
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -224,8 +226,8 @@ async def classify_admin_intent(text):
     if not GROQ_API_KEY or not text:
         return {"action": "none", "word": None}
     prompt = (
-        "انت مصنّف نوايا لبوت إدارة جروبات تليجرام اسمه ليلى، وعنده صلاحيات أدمن كاملة. "
-        "المتكلم أدمن في الجروب وبيكلم ليلى. حدد هل كلامه مهمة إدارية، ولو أيوه حدد نوعها "
+        "انت مصنّف نوايا لبوت إدارة جروبات تليجرام اسمه قطة، وعنده صلاحيات أدمن كاملة. "
+        "المتكلم أدمن في الجروب وبيكلم قطة. حدد هل كلامه مهمة إدارية، ولو أيوه حدد نوعها "
         "بالظبط من الفئات دي:\n"
         "ban = حظر شخص معين من الجروب نهائيًا\n"
         "unban = فك الحظر عن شخص معين\n"
@@ -2140,9 +2142,9 @@ async def on_group_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
                 await ctx.bot.send_message(
                     cid,
-                    f"🔇 تم كتم <a href=\"tg://user?id={uid}\">"
-                    f"{escape_html(update.effective_user.first_name)}</a> لمدة ساعة "
-                    f"بسبب كلمة ممنوعة. (أدمن يقدر يفك الكتم بقوله \"يا ليلى فكي الكتم عنه\")",
+                    f"🔇 كلام وسخ زي ده ملوش مكان هنا. تم كتم <a href=\"tg://user?id={uid}\">"
+                    f"{escape_html(update.effective_user.first_name)}</a> ساعة كاملة. "
+                    f"(أدمن يقدر يفك الكتم بقوله \"يا قطة فكي الكتم عنه\")",
                     parse_mode=ParseMode.HTML,
                 )
             except TelegramError:
