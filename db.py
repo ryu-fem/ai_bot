@@ -271,6 +271,15 @@ def get_user(user_id):
         return _row(r)
 
 
+def get_user_by_username(username):
+    username = username.lstrip("@")
+    with _conn() as c:
+        r = c.execute(
+            "SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)
+        ).fetchone()
+        return _row(r)
+
+
 # ==================== النقاط والإحصائيات ====================
 def get_points(chat_id, user_id):
     with _conn() as c:
