@@ -27,7 +27,7 @@ INITIAL_DEFAULT_CHANNELS = [-1002738530870]
 # مفتاح Groq (مجاني تمامًا، بلا فيزا) - من https://console.groq.com/keys
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
 GROQ_CHAT_MODEL  = "groq/compound"           # فيه بحث ويب تلقائي وقت اللزوم
-GROQ_INTENT_MODEL = "openai/gpt-oss-120b"    # موديل قوي ومتاح حاليًا لفهم العامية في الأوامر الإدارية
+GROQ_INTENT_MODEL = "openai/gpt-oss-20b"     # موديل أخف وأسرع لفهم الأوامر الإدارية
 
 CHANNEL_WAIT_TIMEOUT_MS = 5 * 60 * 1000
 PROMPT_AUTO_DELETE_MS   = 60 * 1000
@@ -150,14 +150,13 @@ AI_NAME_PATTERN = re.compile(
 )
 
 LAILA_SYSTEM_PROMPT = (
-    "انتِ اسمك ليلى، أدمن جريئة وواثقة في الجروب، مش بوت بارد. "
-    "اتكلمي عامية مصرية صريحة وفاجرة شوية زي كلام الشارع، من غير فصحى ومن غير لف. "
-    "كوني مباشرة وحادة لما يلزم، ومش مستحية تقولي كلام سبايسي أو تتقفي مع حد لو بدأ يتهزأ. "
-    "افهمي بسرعة ورُدّي على طول، ردودك قصيرة وحاضرة (سطر أو اتنين غالبًا). "
-    "لو حد بدأ يفتح مواضيع جريئة أو سبايسي، تقدري تكملي معاه بنفس الأسلوب من غير ما تتقيدي أو تتعملي محترمة زيادة. "
-    "لو حد سألك حاجة حديثة، دوري واتأكدي قبل ما تردي. "
-    "متستخدميش رموز برمجية أو كلام إنجليزي غريب إلا لو ضروري. "
-    "انتِ ليكِ صلاحيات أدمن كاملة، ولو حد طلب منكِ تعملي حاجة إدارية (كتم، حظر، مسح، تحذير...) نفذيها لو هو أدمن أو مالك."
+    "انتِ اسمك ليلى، أدمن حقيقي جريء وواثق في الجروب، شخصيتك حادة وجريئة (spicy) مش بايخة أو مطاطة. "
+    "اتكلمي عامية مصري بحتة زي كلام الناس في الشارع، من غير فصحى ومن غير رغي أو مقدمات. "
+    "سيبي نفسك تتكلمي بجرأة وسخرية خفيفة لو الموقف يستاهل، وردّي بثقة زي حد عارف اللي بيعمله مش بيتردد. "
+    "خلي ردك قصير ومباشر (سطر أو اتنين في الغالب)، وما تطوليش غير لو الموضوع فعلاً محتاج تفاصيل. "
+    "لو حد سألك عن حاجة حديثة، اتأكدي من المعلومة الصح بدل ما تجاوبي من معلومة قديمة. "
+    "متكونيش مؤذية أو بذيئة أو عنصرية — الجرأة في الأسلوب مش في الإساءة. "
+    "متستخدميش رموز برمجية أو كلام إنجليزي غريب في الرد."
 )
 
 def extract_ai_query(raw_text):
@@ -212,7 +211,7 @@ async def ask_laila(chat_id, user_id, query, first_name=""):
     return answer
 
 TARGET_ACTIONS = {"ban", "unban", "kick", "mute", "unmute", "warn", "unwarn",
-                   "delete", "pin", "unpin"}
+                   "delete", "pin", "unpin", "promote_admin", "demote_admin"}
 GROUP_ACTIONS  = {"games_on", "games_off", "antilink_on", "antilink_off",
                    "add_banned_word", "remove_banned_word",
                    "add_channel", "remove_channel",
@@ -238,6 +237,8 @@ async def classify_admin_intent(text):
         "delete = مسح رسالة شخص معين بس من غير عقاب\n"
         "pin = تثبيت رسالة معينة\n"
         "unpin = فك تثبيت رسالة معينة\n"
+        "promote_admin = رفع شخص معين أدمن في الجروب\n"
+        "demote_admin = تنزيل شخص معين من الإدمنية\n"
         "games_on = تشغيل/تفعيل الألعاب في الجروب عمومًا\n"
         "games_off = إيقاف/تعطيل الألعاب في الجروب عمومًا\n"
         "antilink_on = تفعيل منع الروابط في الجروب\n"
@@ -428,6 +429,13 @@ async def maybe_ai_reply(bot, msg, cid, uid, text, first_name):
     if await is_user_admin(bot, cid, uid) or is_owner(uid):
         intent = await classify_admin_intent(query)
         action = intent.get("action", "none")
+        if action in ("promote_admin", "demote_admin"):
+            if not (is_owner(uid) or await is_group_creator(bot, cid, uid)):
+                try:
+                    await msg.reply_text("⛔ رفع/تنزيل الأدمن يقدر يعمله صاحب الجروب الأساسي بس.")
+                except TelegramError:
+                    pass
+                return True
         if action in TARGET_ACTIONS:
             if reply_target:
                 await perform_mod_action(bot, msg, cid, reply_target, action)
@@ -478,6 +486,13 @@ async def is_user_admin(bot, cid, uid):
         ok = False
     cache_set(key, ok)
     return ok
+
+async def is_group_creator(bot, cid, uid):
+    try:
+        m = await bot.get_chat_member(cid, uid)
+        return m.status == "creator"
+    except TelegramError:
+        return False
 
 async def get_bot_rights(bot, cid, fresh=False):
     key = f"rights:{cid}"
@@ -1966,6 +1981,42 @@ async def perform_mod_action(bot, msg, cid, reply_to, action):
             await bot.unpin_chat_message(cid, reply_to.message_id)
             try: await msg.reply_text("📌 تم فك التثبيت.")
             except TelegramError: pass
+        except TelegramError as e:
+            try: await msg.reply_text(f"⚠️ فشل: {e.message}")
+            except TelegramError: pass
+
+    elif action == "promote_admin":
+        try:
+            await bot.promote_chat_member(
+                cid, target_id,
+                can_delete_messages=True, can_restrict_members=True,
+                can_invite_users=True, can_pin_messages=True,
+                can_manage_chat=True, can_manage_video_chats=True,
+                can_change_info=False, can_promote_members=False,
+            )
+            await msg.reply_text(
+                f"⭐ تم رفع <a href=\"tg://user?id={target_id}\">{escape_html(target.first_name)}</a> أدمن.",
+                parse_mode=ParseMode.HTML)
+        except TelegramError as e:
+            try: await msg.reply_text(f"⚠️ فشل رفع الأدمن: {e.message}")
+            except TelegramError: pass
+
+    elif action == "demote_admin":
+        if target_id == OWNER_ID:
+            try: await msg.reply_text("⚠️ لا يمكن تنزيل المالك.")
+            except TelegramError: pass
+            return
+        try:
+            await bot.promote_chat_member(
+                cid, target_id,
+                can_delete_messages=False, can_restrict_members=False,
+                can_invite_users=False, can_pin_messages=False,
+                can_manage_chat=False, can_manage_video_chats=False,
+                can_change_info=False, can_promote_members=False,
+            )
+            await msg.reply_text(
+                f"⬇️ تم تنزيل <a href=\"tg://user?id={target_id}\">{escape_html(target.first_name)}</a> من الإدمنية.",
+                parse_mode=ParseMode.HTML)
         except TelegramError as e:
             try: await msg.reply_text(f"⚠️ فشل: {e.message}")
             except TelegramError: pass
