@@ -512,9 +512,17 @@ async def resolve_mention_target(bot, msg):
         if ent.type == "text_mention" and ent.user:
             return ent.user
         if ent.type == "mention":
-            username = msg.text[ent.offset: ent.offset + ent.length]
+            username = msg.text[ent.offset: ent.offset + ent.length].lstrip("@")
+            local = db.get_user_by_username(username)
+            if local:
+                class _LocalUser:
+                    pass
+                u = _LocalUser()
+                u.id = local["user_id"]
+                u.first_name = local["first_name"] or username
+                return u
             try:
-                chat = await bot.get_chat(username)
+                chat = await bot.get_chat("@" + username)
                 if chat.type == "private":
                     return chat
             except TelegramError:
