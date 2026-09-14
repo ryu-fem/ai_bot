@@ -7,7 +7,7 @@ import asyncio
 import logging
 import httpx
 from telegram import (
-    Update, InlineKeyboardButton as B, InlineKeyboardMarkup as M
+    Update, InlineKeyboardButton as B, InlineKeyboardMarkup as M, ChatPermissions
 )
 from telegram.constants import ParseMode, ChatType
 from telegram.error import TelegramError
@@ -419,6 +419,8 @@ async def maybe_ai_reply(bot, msg, cid, uid, text, first_name):
     if not query:
         query = "قولتلي اسمي بس من غير سؤال، رحبي بيا باختصار واسأليني احتاج مساعدة في ايه."
 
+    MESSAGE_ONLY_ACTIONS = {"delete", "pin", "unpin"}
+
     reply_to = msg.reply_to_message
     reply_target = (
         reply_to if (reply_to and reply_to.from_user and reply_to.from_user.id != bot.id)
@@ -437,11 +439,19 @@ async def maybe_ai_reply(bot, msg, cid, uid, text, first_name):
                     pass
                 return True
         if action in TARGET_ACTIONS:
+            target_user, target_msg_id = None, None
             if reply_target:
-                await perform_mod_action(bot, msg, cid, reply_target, action)
+                target_user, target_msg_id = reply_target.from_user, reply_target.message_id
+            elif action not in MESSAGE_ONLY_ACTIONS:
+                target_user = await resolve_mention_target(bot, msg)
+            if target_user:
+                await perform_mod_action(bot, msg, cid, target_user, action, target_msg_id)
                 return True
             try:
-                await msg.reply_text("🤔 لازم تردي على رسالة الشخص اللي عايزة تتصرفي معاه.")
+                if action in MESSAGE_ONLY_ACTIONS:
+                    await msg.reply_text("🤔 لازم تردي على الرسالة اللي عايزة تتصرفي فيها.")
+                else:
+                    await msg.reply_text("🤔 لازم تردي على رسالة الشخص أو تعمليله منشن (@) عشان أعرف مين بالظبط.")
             except TelegramError:
                 pass
             return True
@@ -493,6 +503,23 @@ async def is_group_creator(bot, cid, uid):
         return m.status == "creator"
     except TelegramError:
         return False
+
+async def resolve_mention_target(bot, msg):
+    """بتدور في الرسالة على @يوزر أو تاج مباشر لشخص، وترجع كائن مستخدم تليجرام أو None."""
+    if not msg.entities or not msg.text:
+        return None
+    for ent in msg.entities:
+        if ent.type == "text_mention" and ent.user:
+            return ent.user
+        if ent.type == "mention":
+            username = msg.text[ent.offset: ent.offset + ent.length]
+            try:
+                chat = await bot.get_chat(username)
+                if chat.type == "private":
+                    return chat
+            except TelegramError:
+                continue
+    return None
 
 async def get_bot_rights(bot, cid, fresh=False):
     key = f"rights:{cid}"
@@ -1867,9 +1894,8 @@ def contains_link(text):
     if not text: return False
     return bool(re.search(r"(https?://|t\.me/|www\.|telegram\.me/)", text.lower()))
 
-async def perform_mod_action(bot, msg, cid, reply_to, action):
-    """بتنفّذ فعل إداري فعلي (حظر/كتم/تحذير/مسح...) على صاحب الرسالة reply_to."""
-    target = reply_to.from_user
+async def perform_mod_action(bot, msg, cid, target, action, target_message_id=None):
+    """بتنفّذ فعل إداري فعلي (حظر/كتم/تحذير/مسح...) على target (كائن مستخدم تليجرام)."""
     target_id = target.id
 
     if action == "ban":
@@ -1918,7 +1944,6 @@ async def perform_mod_action(bot, msg, cid, reply_to, action):
             except TelegramError: pass
             return
         try:
-            from telegram import ChatPermissions
             perms = ChatPermissions(can_send_messages=False)
             await bot.restrict_chat_member(cid, target_id, permissions=perms)
             await msg.reply_text(
@@ -1930,7 +1955,6 @@ async def perform_mod_action(bot, msg, cid, reply_to, action):
 
     elif action == "unmute":
         try:
-            from telegram import ChatPermissions
             perms = ChatPermissions(
                 can_send_messages=True, can_send_audios=True, can_send_documents=True,
                 can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
@@ -1962,14 +1986,19 @@ async def perform_mod_action(bot, msg, cid, reply_to, action):
         except TelegramError: pass
 
     elif action == "delete":
-        try: await bot.delete_message(cid, reply_to.message_id)
-        except TelegramError: pass
+        if target_message_id:
+            try: await bot.delete_message(cid, target_message_id)
+            except TelegramError: pass
         try: await bot.delete_message(cid, msg.message_id)
         except TelegramError: pass
 
     elif action == "pin":
+        if not target_message_id:
+            try: await msg.reply_text("🤔 لازم تردي على الرسالة اللي عايزة تثبتيها.")
+            except TelegramError: pass
+            return
         try:
-            await bot.pin_chat_message(cid, reply_to.message_id)
+            await bot.pin_chat_message(cid, target_message_id)
             try: await msg.reply_text("📌 تم تثبيت الرسالة.")
             except TelegramError: pass
         except TelegramError as e:
@@ -1977,8 +2006,12 @@ async def perform_mod_action(bot, msg, cid, reply_to, action):
             except TelegramError: pass
 
     elif action == "unpin":
+        if not target_message_id:
+            try: await msg.reply_text("🤔 لازم تردي على الرسالة اللي عايزة تفكي تثبيتها.")
+            except TelegramError: pass
+            return
         try:
-            await bot.unpin_chat_message(cid, reply_to.message_id)
+            await bot.unpin_chat_message(cid, target_message_id)
             try: await msg.reply_text("📌 تم فك التثبيت.")
             except TelegramError: pass
         except TelegramError as e:
@@ -2089,7 +2122,23 @@ async def on_group_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         bw = db.find_banned_word(cid, text)
         if bw and not await is_user_admin(ctx.bot, cid, uid):
             try: await msg.delete()
-            except: pass
+            except TelegramError: pass
+            try:
+                until = int(time.time()) + 3600  # ساعة واحدة
+                await ctx.bot.restrict_chat_member(
+                    cid, uid,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=until,
+                )
+                await ctx.bot.send_message(
+                    cid,
+                    f"🔇 تم كتم <a href=\"tg://user?id={uid}\">"
+                    f"{escape_html(update.effective_user.first_name)}</a> لمدة ساعة "
+                    f"بسبب كلمة ممنوعة. (أدمن يقدر يفك الكتم بقوله \"يا ليلى فكي الكتم عنه\")",
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramError:
+                pass
             return
 
     # ===== ليلى - الذكاء الاصطناعي =====
